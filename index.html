@@ -80,6 +80,18 @@
       box-shadow: 0 4px 15px rgba(0, 122, 255, 0.5);
       cursor: pointer;
     }
+
+    #error-msg {
+      pointer-events: auto;
+      background: rgba(200, 30, 30, 0.85);
+      color: #fff;
+      padding: 12px 20px;
+      border-radius: 14px;
+      font-size: 14px;
+      max-width: 80%;
+      text-align: center;
+      display: none;
+    }
   </style>
 
   <!-- Three.js para renderizado 3D e interacciones -->
@@ -96,6 +108,7 @@
   <!-- Marcador de Puntos -->
   <div id="ui-layer">
     <div class="hud">Puntos: <span id="score-text">0</span> 🎯</div>
+    <div id="error-msg"></div>
     <button id="start-btn" class="btn-start">¡Empezar a Jugar! 🚀</button>
   </div>
 
@@ -106,66 +119,115 @@
     const targets = [];
     const canvas3D = document.getElementById('canvas-3d');
     const startBtn = document.getElementById('start-btn');
+    const errorMsg = document.getElementById('error-msg');
+
+    // Orientación de referencia (para "calibrar" el cero al empezar)
+    let baseOrientation = null;
+    let currentOrientation = { alpha: 0, beta: 0, gamma: 0 };
 
     init();
 
     function init() {
-      // 1. Escena 3D
       scene = new THREE.Scene();
 
-      // 2. Cámara 3D
       camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 100);
       camera.position.set(0, 0, 0);
+      camera.rotation.order = 'YXZ'; // orden correcto para mapear el giroscopio
 
-      // 3. Renderizador WebGL transparente
       renderer = new THREE.WebGLRenderer({ canvas: canvas3D, alpha: true, antialias: true });
       renderer.setSize(window.innerWidth, window.innerHeight);
       renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 
-      // 4. Luces
       const light = new THREE.DirectionalLight(0xffffff, 1);
       light.position.set(1, 1, 1).normalize();
       scene.add(light);
       scene.add(new THREE.AmbientLight(0xffffff, 0.5));
 
-      // 5. Detectores de toques (Raycaster)
       raycaster = new THREE.Raycaster();
       mouse = new THREE.Vector2();
 
-      // Listeners de eventos de toque
       canvas3D.addEventListener('pointerdown', onTapCube);
       startBtn.addEventListener('click', startGame);
 
       window.addEventListener('resize', onWindowResize);
     }
 
-    // Iniciar la cámara nativa del móvil y generar cubos
+    function showError(text) {
+      errorMsg.textContent = text;
+      errorMsg.style.display = 'block';
+    }
+
+    // Iniciar cámara + giroscopio y generar cubos
     async function startGame() {
       startBtn.style.display = 'none';
 
+      // 1. Cámara trasera
       try {
-        // Pedir permiso de cámara trasera al móvil
         const stream = await navigator.mediaDevices.getUserMedia({
           video: { facingMode: { exact: "environment" } },
           audio: false
         });
         document.getElementById('camera-feed').srcObject = stream;
       } catch (err) {
-        // Fallback si no hay cámara trasera especificada
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-        document.getElementById('camera-feed').srcObject = stream;
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+          document.getElementById('camera-feed').srcObject = stream;
+        } catch (err2) {
+          showError('No se pudo acceder a la cámara: ' + err2.message + '. Revisa que estés en HTTPS y hayas dado permiso.');
+        }
       }
 
-      // Generar 8 cubos iniciales a tu alrededor
-      spawnCubes(8);
+      // 2. Permiso de orientación del dispositivo (obligatorio en iOS 13+)
+      // OJO: tiene que pedirse dentro de este mismo gesto de usuario (el click).
+      if (typeof DeviceOrientationEvent !== 'undefined' &&
+          typeof DeviceOrientationEvent.requestPermission === 'function') {
+        try {
+          const permission = await DeviceOrientationEvent.requestPermission();
+          if (permission === 'granted') {
+            window.addEventListener('deviceorientation', onDeviceOrientation);
+          } else {
+            showError('Permiso de orientación denegado: los cubos no se quedarán anclados al moverte.');
+          }
+        } catch (err) {
+          showError('Este navegador no permitió pedir el giroscopio: ' + err.message);
+        }
+      } else {
+        // Android / navegadores sin el gate de permiso explícito
+        window.addEventListener('deviceorientation', onDeviceOrientation);
+      }
 
-      // Iniciar el bucle de renderizado
+      spawnCubes(8);
       animate();
     }
 
-    // Generar cubos flotantes en posiciones aleatorias alrededor del usuario
+    // Guarda los ángulos crudos del giroscopio
+    function onDeviceOrientation(event) {
+      if (event.alpha === null) return; // sensor no disponible
+
+      if (baseOrientation === null) {
+        // Calibra el "frente" en el momento de empezar a jugar
+        baseOrientation = { alpha: event.alpha, beta: event.beta, gamma: event.gamma };
+      }
+
+      currentOrientation.alpha = event.alpha;
+      currentOrientation.beta = event.beta;
+      currentOrientation.gamma = event.gamma;
+    }
+
+    // Aplica la orientación a la cámara de Three.js cada frame
+    function updateCameraFromOrientation() {
+      if (baseOrientation === null) return;
+
+      const alpha = THREE.MathUtils.degToRad(currentOrientation.alpha - baseOrientation.alpha);
+      const beta = THREE.MathUtils.degToRad(currentOrientation.beta);
+      const gamma = THREE.MathUtils.degToRad(currentOrientation.gamma);
+
+      // Mapeo simplificado: yaw = alpha, pitch = beta, roll = gamma
+      camera.rotation.set(beta - Math.PI / 2, gamma, -alpha, 'YXZ');
+    }
+
     function spawnCubes(count) {
-      const geometry = new THREE.BoxGeometry(0.3, 0.3, 0.3); // Cubos de 30 cm
+      const geometry = new THREE.BoxGeometry(0.3, 0.3, 0.3);
 
       for (let i = 0; i < count; i++) {
         const material = new THREE.MeshPhongMaterial({
@@ -175,12 +237,10 @@
 
         const cube = new THREE.Mesh(geometry, material);
 
-        // Dispersar en un radio alrededor de la cámara (X, Y, Z)
         cube.position.x = (Math.random() - 0.5) * 3;
         cube.position.y = (Math.random() - 0.5) * 2;
-        cube.position.z = -1.5 - Math.random() * 2; // Delante de la cámara
+        cube.position.z = -1.5 - Math.random() * 2;
 
-        // Velocidades de rotación propias
         cube.userData = {
           rotX: (Math.random() - 0.5) * 0.03,
           rotY: (Math.random() - 0.5) * 0.03
@@ -191,9 +251,7 @@
       }
     }
 
-    // Evento al tocar la pantalla para "romper" un cubo
     function onTapCube(event) {
-      // Convertir las coordenadas de la pantalla a coordenadas 3D (-1 a 1)
       mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
       mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
 
@@ -203,16 +261,13 @@
       if (intersects.length > 0) {
         const hitCube = intersects[0].object;
 
-        // 1. Efecto visual: Encoger rápido y eliminar
         hitCube.scale.set(0.01, 0.01, 0.01);
         scene.remove(hitCube);
         targets.splice(targets.indexOf(hitCube), 1);
 
-        // 2. Sumar puntos
         score += 10;
         document.getElementById('score-text').textContent = score;
 
-        // 3. Crear un nuevo cubo en otra posición aleatoria
         spawnCubes(1);
       }
     }
@@ -220,7 +275,8 @@
     function animate() {
       requestAnimationFrame(animate);
 
-      // Rotar los cubos continuamente
+      updateCameraFromOrientation();
+
       targets.forEach(cube => {
         cube.rotation.x += cube.userData.rotX;
         cube.rotation.y += cube.userData.rotY;
