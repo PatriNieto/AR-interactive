@@ -161,24 +161,10 @@
     async function startGame() {
       startBtn.style.display = 'none';
 
-      // 1. Cámara trasera
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { exact: "environment" } },
-          audio: false
-        });
-        document.getElementById('camera-feed').srcObject = stream;
-      } catch (err) {
-        try {
-          const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-          document.getElementById('camera-feed').srcObject = stream;
-        } catch (err2) {
-          showError('No se pudo acceder a la cámara: ' + err2.message + '. Revisa que estés en HTTPS y hayas dado permiso.');
-        }
-      }
-
-      // 2. Permiso de orientación del dispositivo (obligatorio en iOS 13+)
-      // OJO: tiene que pedirse dentro de este mismo gesto de usuario (el click).
+      // 1. Permiso de orientación del dispositivo — PRIMERO y SIN ningún
+      // await por delante, porque en iOS el gesto de usuario del click
+      // caduca en cuanto se resuelve cualquier otra promesa (como la de
+      // la cámara). Tiene que ser literalmente lo primero que se ejecuta.
       if (typeof DeviceOrientationEvent !== 'undefined' &&
           typeof DeviceOrientationEvent.requestPermission === 'function') {
         try {
@@ -194,6 +180,23 @@
       } else {
         // Android / navegadores sin el gate de permiso explícito
         window.addEventListener('deviceorientation', onDeviceOrientation);
+      }
+
+      // 2. Cámara trasera (esto sí puede ir después, getUserMedia es
+      // más tolerante con el gesto de usuario ya "gastado")
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { exact: "environment" } },
+          audio: false
+        });
+        document.getElementById('camera-feed').srcObject = stream;
+      } catch (err) {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+          document.getElementById('camera-feed').srcObject = stream;
+        } catch (err2) {
+          showError('No se pudo acceder a la cámara: ' + err2.message + '. Revisa que estés en HTTPS y hayas dado permiso.');
+        }
       }
 
       spawnCubes(8);
