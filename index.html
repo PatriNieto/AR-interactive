@@ -3,133 +3,208 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>AR Interactivo</title>
-  
-  <!-- Visor oficial de WebAR -->
-  <script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/3.4.0/model-viewer.min.js"></script>
-  
+  <title>Caza de Cubos WebAR</title>
   <style>
-    body { 
-      margin: 0; 
-      padding: 0; 
-      font-family: system-ui, -apple-system, sans-serif; 
-      display: flex; 
-      flex-direction: column; 
-      align-items: center; 
-      justify-content: center; 
-      height: 100vh; 
-      background-color: #0d0d0d; 
+    body {
+      margin: 0;
+      overflow: hidden;
+      font-family: system-ui, -apple-system, sans-serif;
+      background-color: #0d0d0d;
       color: white;
     }
 
-    model-viewer { 
-      width: 100%; 
-      height: 80vh; 
-    }
-
-    /* Estilo del botón de Realidad Aumentada */
-    .ar-button { 
-      background-color: #007AFF; 
-      color: white; 
-      border: none; 
-      padding: 14px 28px; 
-      font-size: 16px; 
-      font-weight: 600; 
-      border-radius: 30px; 
-      cursor: pointer; 
-      box-shadow: 0 4px 15px rgba(0, 122, 255, 0.4); 
-    }
-
-    /* Estilo para el Hotspot pegado al modelo 3D */
-    .hotspot {
-      background: rgba(255, 255, 255, 0.9);
-      border: none;
-      border-radius: 20px;
-      padding: 8px 16px;
-      font-weight: bold;
-      font-size: 14px;
-      color: #333;
-      cursor: pointer;
-      box-shadow: 0 2px 10px rgba(0,0,0,0.3);
-      transition: transform 0.2s ease;
-    }
-    
-    .hotspot:active {
-      transform: scale(0.95);
-    }
-
-    /* Barra inferior para los botones de colores */
-    .controles {
+    /* Interfaz sobrepuesta en la pantalla (HTML Overlay) */
+    #ui-container {
       position: absolute;
-      bottom: 30px;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none; /* Deja pasar los toques al canvas 3D */
       display: flex;
-      gap: 12px;
+      flex-direction: column;
+      justify-content: space-between;
+      align-items: center;
+      padding: 20px;
+      box-sizing: border-box;
       z-index: 10;
     }
 
-    .btn-color {
-      border: none;
+    .score-board {
+      background: rgba(0, 0, 0, 0.6);
+      backdrop-filter: blur(10px);
       padding: 12px 24px;
-      font-weight: bold;
       border-radius: 20px;
-      cursor: pointer;
-      color: white;
-      box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+      font-size: 20px;
+      font-weight: bold;
+      border: 1px solid rgba(255, 255, 255, 0.2);
     }
 
-    .btn-rojo { background-color: #FF3B30; }
-    .btn-azul { background-color: #007AFF; }
-    .btn-verde { background-color: #34C759; }
+    .btn-ar {
+      pointer-events: auto; /* Permite pulsar el botón */
+      background: #007AFF;
+      color: white;
+      border: none;
+      padding: 16px 32px;
+      font-size: 18px;
+      font-weight: bold;
+      border-radius: 30px;
+      box-shadow: 0 4px 15px rgba(0, 122, 255, 0.4);
+      cursor: pointer;
+    }
   </style>
+
+  <!-- Tres.js oficial para renderizado 3D y WebXR -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 </head>
 <body>
 
-  <model-viewer 
-    id="mi-objeto" 
-    src="./particles.glb" 
-    ios-src="./particles.usdz" 
-    camera-controls 
-    ar 
-    ar-modes="quick-look scene-viewer webxr"
-    shadow-intensity="1">
-  
-    <!-- Botón nativo para lanzar AR -->
-    <button slot="ar-button" class="ar-button">
-      Ver en tu espacio 📍
-    </button>
-
-    <!-- Hotspot interactivo en el espacio 3D -->
-    <button 
-      class="hotspot" 
-      slot="hotspot-1" 
-      data-position="0 0.2 0" 
-      data-normal="0 1 0" 
-      onclick="alert('¡Has tocado el centro del modelo!')">
-      📍 Tócame
-    </button>
-
-  </model-viewer>
-
-  <!-- Botones flotantes en la pantalla -->
-  <div class="controles">
-    <button class="btn-color btn-rojo" onclick="cambiarColor([1, 0.2, 0.2, 1])">Rojo</button>
-    <button class="btn-color btn-azul" onclick="cambiarColor([0, 0.5, 1, 1])">Azul</button>
-    <button class="btn-color btn-verde" onclick="cambiarColor([0.2, 0.8, 0.2, 1])">Verde</button>
+  <!-- Marcador y Botón de Inicio -->
+  <div id="ui-container">
+    <div class="score-board">Puntos: <span id="score">0</span> 🎯</div>
+    <button id="start-ar-btn" class="btn-ar">¡Iniciar Juego AR! 🚀</button>
   </div>
 
   <script>
-    function cambiarColor(colorRGBA) {
-      const viewer = document.querySelector('#mi-objeto');
+    let camera, scene, renderer;
+    let raycaster, controller;
+    let score = 0;
+    const targets = []; // Lista de cubos activos en la escena
+
+    init();
+
+    function init() {
+      // 1. Escena 3D
+      scene = new THREE.Scene();
+
+      // 2. Cámara
+      camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+
+      // 3. Renderer con soporte WebXR
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setPixelRatio(window.devicePixelRatio);
+      renderer.xr.enabled = true;
+      document.body.appendChild(renderer.domElement);
+
+      // 4. Luz
+      const light = new THREE.HemisphereLight(0xffffff, 0xbbbbff, 1);
+      scene.add(light);
+
+      // 5. Raycaster (Láser invisible para detectar toques con el dedo)
+      raycaster = new THREE.Raycaster();
+
+      // Configuración del controlador de toque en WebXR
+      controller = renderer.xr.getController(0);
+      controller.addEventListener('select', onSelectTarget); // Se activa al tocar la pantalla en AR
+      scene.add(controller);
+
+      // Gestor del botón de entrada a AR
+      const arButton = document.getElementById('start-ar-btn');
       
-      // Comprobar que el modelo 3D y sus materiales ya se cargaron en memoria
-      if (viewer.model && viewer.model.materials.length > 0) {
-        const material = viewer.model.materials[0];
-        material.pbrMetallicRoughness.setBaseColorFactor(colorRGBA);
+      if ('xr' in navigator) {
+        navigator.xr.isSessionSupported('immersive-ar').then((supported) => {
+          if (supported) {
+            arButton.addEventListener('click', startARSession);
+          } else {
+            arButton.textContent = 'WebXR no disponible en este navegador';
+          }
+        });
       } else {
-        console.warn("El modelo 3D aún se está cargando...");
+        arButton.textContent = 'Abre esta web en Chrome (Android) o WebXR Viewer (iOS)';
+      }
+
+      window.addEventListener('resize', onWindowResize);
+    }
+
+    async function startARSession() {
+      const session = await navigator.xr.requestSession('immersive-ar', {
+        optionalFeatures: ['dom-overlay'],
+        domOverlay: { root: document.getElementById('ui-container') }
+      });
+
+      renderer.xr.setSession(session);
+      document.getElementById('start-ar-btn').style.display = 'none';
+
+      // Generar los 8 cubos iniciales en posiciones aleatorias del espacio
+      spawnCubes(8);
+
+      // Bucle del juego
+      renderer.setAnimationLoop(render);
+    }
+
+    // Generar cubos 3D flotando alrededor del usuario
+    function spawnCubes(count) {
+      const geometry = new THREE.BoxGeometry(0.15, 0.15, 0.15); // Cubos de 15 cm
+
+      for (let i = 0; i < count; i++) {
+        // Material con color aleatorio brillante
+        const material = new THREE.MeshPhongMaterial({
+          color: Math.random() * 0xffffff,
+          shininess: 100
+        });
+
+        const cube = new THREE.Mesh(geometry, material);
+
+        // Posición aleatoria frente al usuario (entre 1m y 2.5m de distancia)
+        cube.position.x = (Math.random() - 0.5) * 2;
+        cube.position.y = (Math.random() - 0.5) * 1.5 + 1; // Altura cómoda para la vista
+        cube.position.z = -1 - Math.random() * 1.5;
+
+        // Velocidad de rotación propia
+        cube.userData = {
+          rotX: (Math.random() - 0.5) * 0.02,
+          rotY: (Math.random() - 0.5) * 0.02
+        };
+
+        scene.add(cube);
+        targets.push(cube);
       }
     }
-  </script>
 
+    // Acción al tocar un cubo con el dedo en Realidad Aumentada
+    function onSelectTarget() {
+      // Crear rayo desde la posición del toque
+      const tempMatrix = new THREE.Matrix4();
+      tempMatrix.identity().extractRotation(controller.matrixWorld);
+
+      raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+      raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
+
+      // Comprobar si el toque impacta contra algún cubo
+      const intersects = raycaster.intersectObjects(targets);
+
+      if (intersects.length > 0) {
+        const hitCube = intersects[0].object;
+
+        // 1. Eliminar el cubo de la escena
+        scene.remove(hitCube);
+        targets.splice(targets.indexOf(hitCube), 1);
+
+        // 2. Sumar punto
+        score += 10;
+        document.getElementById('score').textContent = score;
+
+        // 3. Crear un nuevo cubo para que el juego sea infinito
+        spawnCubes(1);
+      }
+    }
+
+    function render(time) {
+      // Hacer girar lentamente los cubos en el aire
+      targets.forEach(cube => {
+        cube.rotation.x += cube.userData.rotX;
+        cube.rotation.y += cube.userData.rotY;
+      });
+
+      renderer.render(scene, camera);
+    }
+
+    function onWindowResize() {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+  </script>
 </body>
 </html>
