@@ -182,44 +182,50 @@
     // Iniciar cámara + giroscopio y generar cubos
     async function startGame() {
       startBtn.style.display = 'none';
+      const videoEl = document.getElementById('camera-feed');
 
-      // 1. Permiso de orientación del dispositivo — PRIMERO y SIN ningún
-      // await por delante, porque en iOS el gesto de usuario del click
-      // caduca en cuanto se resuelve cualquier otra promesa (como la de
-      // la cámara). Tiene que ser literalmente lo primero que se ejecuta.
-      if (typeof DeviceOrientationEvent !== 'undefined' &&
-          typeof DeviceOrientationEvent.requestPermission === 'function') {
-        try {
-          const permission = await DeviceOrientationEvent.requestPermission();
-          if (permission === 'granted') {
-            window.addEventListener('deviceorientation', onDeviceOrientation);
-          } else {
-            showError('Permiso de orientación denegado: los cubos no se quedarán anclados al moverte.');
-          }
-        } catch (err) {
-          showError('Este navegador no permitió pedir el giroscopio: ' + err.message);
-        }
-      } else {
-        // Android / navegadores sin el gate de permiso explícito
+      // OJO IMPORTANTE: las dos llamadas siguientes se INICIAN aquí,
+      // en el mismo tick síncrono del click, sin ningún await entre
+      // medias. En iOS, tanto DeviceOrientationEvent.requestPermission()
+      // como getUserMedia() necesitan "gesto de usuario reciente" —
+      // si esperas (await) a que la primera resuelva antes de lanzar
+      // la segunda, para cuando llega su turno el gesto ya caducó y
+      // te la deniega sin ni preguntar ("not allowed"). Lanzándolas
+      // las dos ya mismo, y esperando juntas con Promise.allSettled,
+      // ambas cuentan como iniciadas por el mismo toque.
+      const orientationPromise =
+        (typeof DeviceOrientationEvent !== 'undefined' &&
+         typeof DeviceOrientationEvent.requestPermission === 'function')
+          ? DeviceOrientationEvent.requestPermission()
+          : Promise.resolve('granted');
+
+      const cameraPromise = navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { exact: "environment" } },
+        audio: false
+      }).catch(() => navigator.mediaDevices.getUserMedia({ video: true, audio: false }));
+
+      const [orientationResult, cameraResult] = await Promise.allSettled([
+        orientationPromise,
+        cameraPromise
+      ]);
+
+      // Resultado del giroscopio
+      if (orientationResult.status === 'fulfilled' && orientationResult.value === 'granted') {
         window.addEventListener('deviceorientation', onDeviceOrientation);
+      } else if (orientationResult.status === 'rejected') {
+        showError('Este navegador no permitió pedir el giroscopio: ' + orientationResult.reason.message);
+      } else {
+        showError('Permiso de orientación denegado: los cubos no se quedarán anclados al moverte.');
       }
 
-      // 2. Cámara trasera (esto sí puede ir después, getUserMedia es
-      // más tolerante con el gesto de usuario ya "gastado")
-      const videoEl = document.getElementById('camera-feed');
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { exact: "environment" } },
-          audio: false
-        });
-        await attachStream(videoEl, stream);
-      } catch (err) {
-        try {
-          const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-          await attachStream(videoEl, stream);
-        } catch (err2) {
-          showError('No se pudo acceder a la cámara: ' + err2.message + '. Revisa que estés en HTTPS y hayas dado permiso.');
-        }
+      // Resultado de la cámara
+      if (cameraResult.status === 'fulfilled') {
+        await attachStream(videoEl, cameraResult.value);
+      } else {
+        showError(
+          'No se pudo acceder a la cámara: ' + cameraResult.reason.message +
+          '. Si ya la denegaste antes, ve a Ajustes > Safari > Cámara (o toca el icono "aA" en la barra de direcciones > Ajustes del sitio web) y ponla en "Preguntar" o "Permitir".'
+        );
       }
 
       spawnCubes(8);
