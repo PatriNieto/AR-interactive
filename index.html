@@ -92,6 +92,25 @@
       text-align: center;
       display: none;
     }
+
+    #hand-cursor {
+      position: absolute;
+      width: 28px;
+      height: 28px;
+      margin-left: -14px;
+      margin-top: -14px;
+      border-radius: 50%;
+      border: 3px solid #00E0FF;
+      background: rgba(0, 224, 255, 0.25);
+      z-index: 4;
+      pointer-events: none;
+      display: none;
+      transition: background 0.1s, border-color 0.1s;
+    }
+    #hand-cursor.pinching {
+      border-color: #39FF6A;
+      background: rgba(57, 255, 106, 0.4);
+    }
   </style>
 
   <!-- Three.js para renderizado 3D e interacciones -->
@@ -104,6 +123,9 @@
 
   <!-- Canvas donde se renderizan los cubos interactivos -->
   <canvas id="canvas-3d"></canvas>
+
+  <!-- Puntero visual que sigue al dedo índice cuando se detecta la mano -->
+  <div id="hand-cursor"></div>
 
   <!-- Marcador de Puntos -->
   <div id="ui-layer">
@@ -184,16 +206,17 @@
 
       // 2. Cámara trasera (esto sí puede ir después, getUserMedia es
       // más tolerante con el gesto de usuario ya "gastado")
+      const videoEl = document.getElementById('camera-feed');
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
           video: { facingMode: { exact: "environment" } },
           audio: false
         });
-        document.getElementById('camera-feed').srcObject = stream;
+        await attachStream(videoEl, stream);
       } catch (err) {
         try {
           const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-          document.getElementById('camera-feed').srcObject = stream;
+          await attachStream(videoEl, stream);
         } catch (err2) {
           showError('No se pudo acceder a la cámara: ' + err2.message + '. Revisa que estés en HTTPS y hayas dado permiso.');
         }
@@ -201,6 +224,22 @@
 
       spawnCubes(8);
       animate();
+      if (window.enableHandTracking) window.enableHandTracking(videoEl);
+    }
+
+    // Asigna el stream y fuerza el play() explícito: tras varios awaits
+    // (permiso de giroscopio, permiso de cámara) Safari a veces ya no
+    // considera "reciente" el gesto de usuario y el autoplay silencioso
+    // no arranca solo con los atributos autoplay/muted/playsinline.
+    async function attachStream(videoEl, stream) {
+      videoEl.srcObject = stream;
+      try {
+        await videoEl.play();
+      } catch (err) {
+        showError('El vídeo no arrancó solo, toca la pantalla para activarlo.');
+        const resumeOnce = () => { videoEl.play(); document.removeEventListener('pointerdown', resumeOnce); };
+        document.addEventListener('pointerdown', resumeOnce);
+      }
     }
 
     // Guarda los ángulos crudos del giroscopio
@@ -255,8 +294,14 @@
     }
 
     function onTapCube(event) {
-      mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
-      mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+      triggerTapAtClientXY(event.clientX, event.clientY);
+    }
+
+    // Misma lógica de "romper cubo", pero reutilizable tanto por el
+    // toque en pantalla como por el gesto de pellizco de la mano.
+    function triggerTapAtClientXY(clientX, clientY) {
+      mouse.x = (clientX / window.innerWidth) * 2 - 1;
+      mouse.y = -(clientY / window.innerHeight) * 2 + 1;
 
       raycaster.setFromCamera(mouse, camera);
       const intersects = raycaster.intersectObjects(targets);
@@ -274,6 +319,7 @@
         spawnCubes(1);
       }
     }
+    window.triggerTapAtClientXY = triggerTapAtClientXY;
 
     function animate() {
       requestAnimationFrame(animate);
@@ -292,6 +338,110 @@
       camera.aspect = window.innerWidth / window.innerHeight;
       camera.updateProjectionMatrix();
       renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+  </script>
+
+  <!-- Detección de mano (pellizco pulgar-índice) usando MediaPipe Tasks Vision.
+       Va en un <script type="module"> aparte porque la librería se importa
+       como módulo ES; se comunica con el script principal a través de
+       funciones colgadas de window (triggerTapAtClientXY, etc.). -->
+  <script type="module">
+    import {
+      HandLandmarker,
+      FilesetResolver
+    } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+
+    const PINCH_THRESHOLD = 0.06; // distancia normalizada pulgar-índice para considerar "pellizco"
+    const handCursor = document.getElementById('hand-cursor');
+
+    let handLandmarker = null;
+    let lastVideoTime = -1;
+    let wasPinching = false;
+    let running = false;
+
+    // Mapea coordenadas normalizadas del vídeo (0-1) a coordenadas de
+    // pantalla reales, compensando el recorte que hace object-fit: cover.
+    function videoToScreenXY(videoEl, nx, ny) {
+      const vw = videoEl.videoWidth, vh = videoEl.videoHeight;
+      const ww = window.innerWidth, wh = window.innerHeight;
+      if (!vw || !vh) return { x: nx * ww, y: ny * wh };
+
+      const videoRatio = vw / vh;
+      const winRatio = ww / wh;
+
+      if (winRatio > videoRatio) {
+        const scale = ww / vw;
+        const offsetY = (vh * scale - wh) / 2;
+        return { x: nx * vw * scale, y: ny * vh * scale - offsetY };
+      } else {
+        const scale = wh / vh;
+        const offsetX = (vw * scale - ww) / 2;
+        return { x: nx * vw * scale - offsetX, y: ny * vh * scale };
+      }
+    }
+
+    window.enableHandTracking = async function(videoEl) {
+      if (running) return;
+      running = true;
+      try {
+        const vision = await FilesetResolver.forVisionTasks(
+          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+        );
+        handLandmarker = await HandLandmarker.createFromOptions(vision, {
+          baseOptions: {
+            modelAssetPath:
+              "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+            delegate: "GPU"
+          },
+          runningMode: "VIDEO",
+          numHands: 1
+        });
+        detectLoop(videoEl);
+      } catch (err) {
+        // Si el modelo no carga (sin red, navegador sin WebGL para el
+        // delegate GPU, etc.) el juego sigue funcionando solo con el
+        // toque en pantalla — esto no debe romper nada más.
+        window.showError && window.showError('No se pudo activar el control por mano: ' + err.message);
+      }
+    };
+
+    function detectLoop(videoEl) {
+      requestAnimationFrame(() => detectLoop(videoEl));
+      if (!handLandmarker || videoEl.readyState < 2) return;
+      if (videoEl.currentTime === lastVideoTime) return;
+      lastVideoTime = videoEl.currentTime;
+
+      const results = handLandmarker.detectForVideo(videoEl, performance.now());
+
+      if (!results.landmarks || results.landmarks.length === 0) {
+        handCursor.style.display = 'none';
+        wasPinching = false;
+        return;
+      }
+
+      const lm = results.landmarks[0];
+      const thumbTip = lm[4];
+      const indexTip = lm[8];
+
+      // Punto medio entre pulgar e índice: ahí "apunta" la mano
+      const midX = (thumbTip.x + indexTip.x) / 2;
+      const midY = (thumbTip.y + indexTip.y) / 2;
+      const { x: screenX, y: screenY } = videoToScreenXY(videoEl, midX, midY);
+
+      handCursor.style.display = 'block';
+      handCursor.style.left = screenX + 'px';
+      handCursor.style.top = screenY + 'px';
+
+      const dist = Math.hypot(thumbTip.x - indexTip.x, thumbTip.y - indexTip.y);
+      const isPinching = dist < PINCH_THRESHOLD;
+      handCursor.classList.toggle('pinching', isPinching);
+
+      // Disparo solo en el flanco de subida (al cerrar el pellizco),
+      // no en cada frame que sigues pellizcando.
+      if (isPinching && !wasPinching && window.triggerTapAtClientXY) {
+        window.triggerTapAtClientXY(screenX, screenY);
+      }
+      wasPinching = isPinching;
     }
   </script>
 </body>
